@@ -1,0 +1,11 @@
+{
+  "tickers": [
+    "AAPL",
+    "META",
+    "MSFT",
+    "NVDA",
+    "GOOG",
+    "SNDK"
+  ],
+  "notes": "Add or remove tickers here. Use uppercase ticker symbols only."
+}
