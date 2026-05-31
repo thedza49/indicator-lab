@@ -2,7 +2,7 @@
 
 **Sovson Analytics** — Stock indicator analysis engine running on Oracle Cloud.
 
-Collects daily OHLCV price data and calculates four technical indicators for a configurable basket of tickers. Exposes a lightweight Flask API so Claude can query live data during chat sessions and deliver plain-English analysis.
+Collects daily OHLCV price data, calculates four technical indicators for a configurable basket of tickers, and exports the results to GitHub so Claude can fetch and analyze them on demand from any device.
 
 ---
 
@@ -14,18 +14,76 @@ Collects daily OHLCV price data and calculates four technical indicators for a c
    - RSI (14) — overbought / oversold exhaustion meter
    - Bollinger Bands (20/2) — volatility envelope and price position
    - SMA 200 — long-term trend context
-3. **Stores** everything in a local SQLite database
-4. **Serves** the data via a Flask API that Claude can query on demand
+3. **Stores** everything in a local SQLite database on the Oracle VM
+4. **Exports** daily JSON snapshots to this GitHub repo so Claude can read them without any direct connection to the VM
 
 ---
 
-## Setup
+## How Claude Accesses the Data
+
+Claude reads indicator data directly from this repo via raw GitHub URLs:
+
+```
+https://raw.githubusercontent.com/thedza49/indicator-lab/main/data/{TICKER}.json
+```
+
+Available tickers: `AAPL`, `META`, `MSFT`, `NVDA`, `GOOG`, `SNDK`
+
+No API keys or tunnels required — files are public. To trigger a full analysis, type `/stock_analysis` in Claude chat.
+
+---
+
+## Data Flow
+
+```
+Yahoo Finance
+     ↓
+Oracle Cloud VM (scripts/run_all.py)
+     ↓
+SQLite Database
+     ↓
+Flask API (localhost:5001)
+     ↓
+export_to_github.sh
+     ↓
+GitHub repo (data/*.json)
+     ↓
+Claude (via raw GitHub URL)
+```
+
+---
+
+## Running Daily (Cron)
+
+Two cron jobs run automatically on the Oracle VM every weekday at 9pm UTC (2pm Pacific):
+
+```
+0 21 * * 1-5 cd /home/ubuntu/indicator-lab && python3 scripts/run_all.py >> logs/cron.log 2>&1
+0 21 * * 1-5 /home/ubuntu/indicator-lab/export_to_github.sh >> logs/export.log 2>&1
+```
+
+The first job fetches prices and recalculates indicators. The second exports the results to GitHub.
+
+---
+
+## Manual Export
+
+To push fresh data to GitHub outside of the scheduled cron:
+
+```bash
+ssh into Oracle VM
+~/indicator-lab/export_to_github.sh
+```
+
+---
+
+## Setup (Oracle VM)
 
 ### 1. Clone and install dependencies
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/Sovson-Indicator-Lab.git
-cd Sovson-Indicator-Lab
+git clone https://github.com/thedza49/indicator-lab.git
+cd indicator-lab
 pip3 install -r requirements.txt
 ```
 
@@ -33,64 +91,55 @@ pip3 install -r requirements.txt
 
 ```bash
 cp .env.example .env
-nano .env   # Fill in your FMP_API_KEY and set API_KEY for auth
+nano .env   # Fill in your API keys
 ```
 
-### 3. Add your tickers
-
-Edit `config/tickers.json` — add or remove ticker symbols as needed.
-
-### 4. Run the pipeline for the first time
+### 3. Run the pipeline for the first time
 
 ```bash
 python3 scripts/run_all.py
 ```
 
-This fetches 365 days of history (configurable via `INITIAL_HISTORY_DAYS` in `.env`) and calculates all indicators.
-
-### 5. Start the API
+### 4. Start the Flask API (used by the export script)
 
 ```bash
-python3 api/app.py
+cd ~/indicator-lab && nohup python3 api/app.py > logs/api.log 2>&1 &
 ```
 
-The API runs on port `5001` by default.
-
----
-
-## Running Daily (Cron)
-
-To keep data fresh, add a cron job that runs after market close:
+### 5. Configure git credentials for GitHub push
 
 ```bash
-crontab -e
-```
-
-Add this line (runs at 9pm UTC = 1pm PST, Monday–Friday):
-
-```
-0 21 * * 1-5 cd /home/ubuntu/Sovson-Indicator-Lab && python3 scripts/run_all.py >> logs/cron.log 2>&1
+git config --global user.email "your@email.com"
+git config --global user.name "your-github-username"
+git remote set-url origin https://YOUR_USERNAME:YOUR_GITHUB_TOKEN@github.com/thedza49/indicator-lab.git
 ```
 
 ---
 
-## API Endpoints
+## Project Structure
 
-All endpoints return JSON.
-
-| Endpoint | Description |
-|---|---|
-| `GET /` | Health check |
-| `GET /tickers` | List all configured tickers |
-| `GET /snapshot/{ticker}` | Latest indicator snapshot for one ticker |
-| `GET /summary` | Latest snapshot for all tickers |
-| `GET /indicators/{ticker}?days=30` | Last N days of indicator data |
-| `GET /prices/{ticker}?days=60` | Last N days of raw price data |
-| `GET /signals/{ticker}?days=90` | Days where a signal event fired |
-
-If `API_KEY` is set in `.env`, include it as a request header:
 ```
-X-API-Key: your_key_here
+indicator-lab/
+├── api/
+│   └── app.py                   # Flask API (localhost:5001)
+├── config/
+│   └── tickers.json             # Ticker list — edit to add/remove
+├── data/
+│   ├── AAPL.json                # Daily export — read by Claude
+│   ├── GOOG.json
+│   ├── META.json
+│   ├── MSFT.json
+│   ├── NVDA.json
+│   └── SNDK.json
+├── scripts/
+│   ├── fetch_prices.py          # Pulls OHLCV from Yahoo Finance
+│   ├── calculate_indicators.py  # Computes all four indicators
+│   └── run_all.py               # Runs fetch + calculate in sequence
+├── logs/                        # Log files (auto-created)
+├── export_to_github.sh          # Exports data/ JSON files and pushes to GitHub
+├── .env.example
+├── requirements.txt
+└── README.md
 ```
 
 ---
@@ -101,33 +150,11 @@ Edit `config/tickers.json`:
 
 ```json
 {
-  "tickers": ["AAPL", "NVDA", "MSFT", "META", "GOOG", "SNDK", "TSLA"]
+  "tickers": ["AAPL", "META", "MSFT", "NVDA", "GOOG", "SNDK"]
 }
 ```
 
-Then run `python3 scripts/run_all.py` to backfill history for any new tickers.
-
----
-
-## Project Structure
-
-```
-Sovson-Indicator-Lab/
-├── config/
-│   └── tickers.json          # Ticker list — edit to add/remove
-├── data/
-│   └── indicators.db         # SQLite database (auto-created)
-├── scripts/
-│   ├── fetch_prices.py       # Pulls OHLCV from Yahoo Finance
-│   ├── calculate_indicators.py  # Computes all four indicators
-│   └── run_all.py            # Runs fetch + calculate in sequence
-├── api/
-│   └── app.py                # Flask API
-├── logs/                     # Log files (auto-created)
-├── .env.example              # Environment variable template
-├── requirements.txt
-└── README.md
-```
+Then run `python3 scripts/run_all.py` to backfill history for any new tickers, and update `export_to_github.sh` to include the new ticker in the loop.
 
 ---
 
