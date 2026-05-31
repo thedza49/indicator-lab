@@ -5,13 +5,13 @@
     "MSFT",
     "NVDA",
     "GOOG",
-    "SNDK"
-    "MU"
-    "AMZN"
-    "ORCL"
-    "NVT"
-    "HOOD"
-    "TSM"
+    "SNDK",
+    "MU",
+    "AMZN",
+    "ORCL",
+    "NVT",
+    "HOOD",
+    "TSM",
     "AVGO"
   ],
   "notes": "Add or remove tickers here. Use uppercase ticker symbols only."
