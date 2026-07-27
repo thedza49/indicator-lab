@@ -16,7 +16,6 @@ import sqlite3
 import logging
 import json
 from pathlib import Path
-
 import pandas as pd
 import numpy as np
 
@@ -130,7 +129,7 @@ def detect_crossover(series_a, series_b):
     crossed above series_b (was below yesterday, is above today).
     """
     above_today     = series_a > series_b
-    above_yesterday = above_today.shift(1)
+    above_yesterday = above_today.shift(1).fillna(False).astype(bool)
     return (above_today & ~above_yesterday).fillna(False)
 
 
@@ -140,7 +139,7 @@ def detect_crossunder(series_a, series_b):
     crossed below series_b.
     """
     below_today     = series_a < series_b
-    below_yesterday = below_today.shift(1)
+    below_yesterday = below_today.shift(1).fillna(False).astype(bool)
     return (below_today & ~below_yesterday).fillna(False)
 
 
@@ -243,19 +242,26 @@ def calculate_for_ticker(conn, ticker):
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     log.info("=== calculate_indicators.py starting ===")
-    conn = get_connection()
-    setup_indicators_table(conn)
+    try:
+        conn = get_connection()
+        setup_indicators_table(conn)
 
-    with open(CFG_PATH) as f:
-        tickers = [t.upper() for t in json.load(f)["tickers"]]
+        with open(CFG_PATH) as f:
+            tickers = [t.upper() for t in json.load(f)["tickers"]]
 
-    log.info(f"Tickers: {tickers}")
-    total = 0
-    for ticker in tickers:
-        total += calculate_for_ticker(conn, ticker)
+        log.info(f"Tickers: {tickers}")
+        total = 0
+        for ticker in tickers:
+            try:
+                total += calculate_for_ticker(conn, ticker)
+            except Exception as ticker_err:
+                log.error(f"Error calculating indicators for {ticker}: {ticker_err}")
 
-    conn.close()
-    log.info(f"=== Done. Total rows written: {total} ===")
+        conn.close()
+        log.info(f"=== Done. Total rows written: {total} ===")
+    except Exception as fatal_err:
+        log.critical(f"Fatal error in calculate_indicators: {fatal_err}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

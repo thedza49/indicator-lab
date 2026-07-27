@@ -23,4 +23,26 @@ Patterns will be introduced in order of reliability and ease of automated detect
 
 ### ✅ Promotion Criteria
 
+## 🛠️ Accessing Data
+
+### View Raw Archive (On the VM)
+Query the historical archive directly:
+```bash
+python3 -c "import sqlite3; conn = sqlite3.connect('data/indicators.db'); cursor = conn.cursor(); cursor.execute('SELECT COUNT(*) FROM daily_prices'); print(cursor.fetchone()[0]); conn.close()"
+```
+
+### View Daily Snapshots (Via GitHub)
+`https://raw.githubusercontent.com/thedza49/indicator-lab/main/data/{TICKER}.json`
+
+---
+
+## ⚙️ Maintenance
+
+### Automated Tasks
+To prevent race conditions, the data refresh and GitHub export are chained together to run on weekdays at 9pm UTC:
+```cron
+0 21 * * 1-5 cd /home/ubuntu/indicator-lab && python3 scripts/run_all.py >> logs/cron.log 2>&1 && ./export_to_github.sh >> logs/export.log 2>&1
+```
+
+*Developed for Daniel — Sovson Analytics*
 Same bar as every other contestant in the Indicator Lab: a pattern only becomes a live signal candidate once it demonstrates a **≥60% win rate at the 10-day forward window** in backtesting. No pattern goes live on vibes alone — human review of the backtest results decides if/when it graduates.

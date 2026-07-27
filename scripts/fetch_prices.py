@@ -162,41 +162,50 @@ def save_prices(conn, rows):
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     log.info("=== fetch_prices.py starting ===")
-    conn = get_connection()
-    setup_database(conn)
+    try:
+        conn = get_connection()
+        setup_database(conn)
 
-    tickers = load_tickers()
-    log.info(f"Tickers: {tickers}")
-    register_tickers(conn, tickers)
+        tickers = load_tickers()
+        log.info(f"Tickers: {tickers}")
+        register_tickers(conn, tickers)
 
-    today     = datetime.today().date()
-    total_new = 0
+        today     = datetime.today().date()
+        total_new = 0
 
-    for ticker in tickers:
-        last_date = get_last_stored_date(conn, ticker)
+        for ticker in tickers:
+            try:
+                last_date = get_last_stored_date(conn, ticker)
 
-        if last_date:
-            # Start from the day after last stored date
-            start = (datetime.strptime(last_date, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
-            log.info(f"{ticker}: last stored date is {last_date}, fetching from {start}")
-        else:
-            # First run — go back INITIAL_HISTORY_DAYS
-            start = (today - timedelta(days=INITIAL_HISTORY_DAYS)).isoformat()
-            log.info(f"{ticker}: no data yet, fetching {INITIAL_HISTORY_DAYS} days of history from {start}")
+                if last_date:
+                    # Start from the day after last stored date
+                    start = (datetime.strptime(last_date, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
+                    log.info(f"{ticker}: last stored date is {last_date}, fetching from {start}")
+                else:
+                    # First run — go back INITIAL_HISTORY_DAYS
+                    start = (today - timedelta(days=INITIAL_HISTORY_DAYS)).isoformat()
+                    log.info(f"{ticker}: no data yet, fetching {INITIAL_HISTORY_DAYS} days of history from {start}")
 
-        end = today.isoformat()
+                end = today.isoformat()
 
-        if start >= end:
-            log.info(f"{ticker}: already up to date, skipping.")
-            continue
+                if start >= end:
+                    log.info(f"{ticker}: already up to date, skipping.")
+                    continue
 
-        rows    = fetch_prices_for_ticker(ticker, start, end)
-        new     = save_prices(conn, rows)
-        total_new += new
-        log.info(f"{ticker}: saved {new} new rows.")
+                rows    = fetch_prices_for_ticker(ticker, start, end)
+                if not rows:
+                    log.warning(f"{ticker}: no price rows retrieved.")
+                new     = save_prices(conn, rows)
+                total_new += new
+                log.info(f"{ticker}: saved {new} new rows.")
+            except Exception as ticker_err:
+                log.error(f"Error processing ticker {ticker}: {ticker_err}")
 
-    conn.close()
-    log.info(f"=== Done. Total new rows inserted: {total_new} ===")
+        conn.close()
+        log.info(f"=== Done. Total new rows inserted: {total_new} ===")
+    except Exception as fatal_err:
+        log.critical(f"Fatal error in fetch_prices: {fatal_err}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
