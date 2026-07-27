@@ -1,254 +1,135 @@
-"""
-fetch_prices.py — Sovson Indicator Lab
-Pulls daily OHLCV price data for all tickers in config/tickers.json
-using yahooquery and stores it in the SQLite database.
+#!/bin/bash
 
-Run manually:  python3 scripts/fetch_prices.py
-Or via cron:   0 21 * * 1-5 cd /path/to/project && python3 scripts/fetch_prices.py
-               (runs at 9pm UTC / 1pm PST, Monday–Friday, after market close)
-"""
+API="http://localhost:5001"
+KEY="sovson2026"
+REPO="$HOME/indicator-lab"
 
-import os
-import sys
-import json
-import time
-import random
-import sqlite3
-import logging
-from datetime import datetime, timedelta
-from pathlib import Path
+# If we are in the repository, use current directory instead of hardcoded $HOME if it doesn't exist
+if [ -d "$REPO" ]; then
+  cd "$REPO"
+else
+  REPO=$(pwd)
+  cd "$REPO"
+fi
 
-from dotenv import load_dotenv
-from yahooquery import Ticker
+log_error() {
+  local msg="$1"
+  echo "ERROR: $msg"
+}
 
-# ── Setup ──────────────────────────────────────────────────────────────────────
-load_dotenv()
+# ── Step 0: Recover from any previous failed run ───────────────────────────────
+# If a prior run committed data locally but failed to push (e.g. rejected due
+# to a non-fast-forward), that commit is still sitting on this machine ahead
+# of origin. Try to push it before doing anything else, so we never pile a
+# new day's commit on top of an unresolved old one.
+git fetch origin main --quiet
+AHEAD=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
+if [ "$AHEAD" -gt 0 ]; then
+  echo "Found $AHEAD unpushed local commit(s) from a previous run. Attempting to push first..."
+  if git push; then
+    echo "Recovered: previous local commit(s) pushed successfully."
+  else
+    log_error "Could not push previous local commit(s). Resolve manually before continuing (git log, git status)."
+    exit 1
+  fi
+fi
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH  = BASE_DIR / "data" / "indicators.db"
-CFG_PATH = BASE_DIR / "config" / "tickers.json"
-LOG_PATH = BASE_DIR / "logs" / "fetch_prices.log"
+# ── Step 1: Sync with GitHub BEFORE touching any data files ────────────────────
+# This is the fix for the conflict we hit: pulling AFTER overwriting data/*.json
+# caused "local changes would be overwritten by merge". Pulling first, while the
+# working tree is clean, means there's nothing to conflict with.
+if ! git pull --ff-only; then
+  log_error "Git pull failed (working tree not clean or history diverged.) Not safe to proceed — resolve manually with 'git status' / 'git fetch' before re-running."
+  exit 1
+fi
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_PATH),
-        logging.StreamHandler()
-    ]
-)
-log = logging.getLogger(__name__)
+# Ensure data directory exists
+mkdir -p data
 
-INITIAL_HISTORY_DAYS = int(os.getenv("INITIAL_HISTORY_DAYS", 365))
+# Read tickers from config/tickers.json
+TICKERS=($(python3 -c "import json; data=json.load(open('config/tickers.json')); print(' '.join(data['tickers']))"))
 
-# Retry settings for Yahoo Finance rate limiting (HTTP 429 / "Failed to obtain crumb")
-MAX_RETRIES         = 3
-BASE_BACKOFF_SECS   = 10      # first retry waits ~10s, then ~20s, then ~40s (+ jitter)
-DELAY_BETWEEN_TICKERS_SECS = 2   # small gap between tickers so we don't hammer Yahoo in a burst
+if [ ${#TICKERS[@]} -eq 0 ]; then
+  echo "Error: No tickers found in config/tickers.json"
+  exit 1
+fi
 
+# ── Step 2: Fetch + validate + write each ticker's data ────────────────────────
+for TICKER in "${TICKERS[@]}"; do
+  echo "Exporting $TICKER ..."
 
-# ── Database setup ─────────────────────────────────────────────────────────────
-def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+  TMP_IND="data/${TICKER}_ind.json.tmp"
+  TMP_SNAP="data/${TICKER}_snap.json.tmp"
 
+  # 1. Fetch and validate Indicators
+  curl -s -f -H "X-API-Key: $KEY" "$API/indicators/$TICKER?days=30" > "$TMP_IND"
+  if [ $? -ne 0 ] || [ ! -s "$TMP_IND" ]; then
+    log_error "Failed to fetch indicators for $TICKER (API/Network error)."
+    rm -f "$TMP_IND" "$TMP_SNAP"
+    exit 1
+  fi
 
-def setup_database(conn):
-    """Create tables if they don't exist yet."""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS daily_prices (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker      TEXT    NOT NULL,
-            date        TEXT    NOT NULL,
-            open        REAL,
-            high        REAL,
-            low         REAL,
-            close       REAL,
-            volume      INTEGER,
-            fetched_at  TEXT    DEFAULT (datetime('now')),
-            UNIQUE(ticker, date)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS tickers (
-            ticker      TEXT PRIMARY KEY,
-            active      INTEGER DEFAULT 1,
-            added_at    TEXT    DEFAULT (datetime('now'))
-        )
-    """)
-    conn.commit()
-    log.info("Database tables verified.")
-
-
-# ── Ticker management ──────────────────────────────────────────────────────────
-def load_tickers():
-    with open(CFG_PATH) as f:
-        data = json.load(f)
-    return [t.upper() for t in data["tickers"]]
-
-
-def register_tickers(conn, tickers):
-    """Make sure every ticker in config exists in the tickers table."""
-    for ticker in tickers:
-        conn.execute(
-            "INSERT OR IGNORE INTO tickers (ticker) VALUES (?)", (ticker,)
-        )
-    conn.commit()
-
-
-# ── Last stored date helper ────────────────────────────────────────────────────
-def get_last_stored_date(conn, ticker):
-    """Returns the most recent date we have data for, or None if no data."""
-    row = conn.execute(
-        "SELECT MAX(date) as last_date FROM daily_prices WHERE ticker = ?",
-        (ticker,)
-    ).fetchone()
-    return row["last_date"] if row and row["last_date"] else None
-
-
-def _is_rate_limit_error(err) -> bool:
-    """Detect Yahoo Finance rate limiting / crumb failures from the exception text."""
-    msg = str(err).lower()
-    return "429" in msg or "crumb" in msg or "too many" in msg
-
-
-# ── Price fetching ─────────────────────────────────────────────────────────────
-def fetch_prices_for_ticker(ticker, start_date, end_date):
-    """
-    Fetch OHLCV data from Yahoo Finance via yahooquery.
-    Returns a list of dicts, one per trading day.
-    Retries with exponential backoff if Yahoo rate-limits us (HTTP 429 /
-    "Failed to obtain crumb"), since that's a transient, not permanent, failure.
-    """
-    log.info(f"  Fetching {ticker} from {start_date} to {end_date} ...")
-
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            t = Ticker(ticker)
-            df = t.history(start=start_date, end=end_date)
-
-            if df is None or df.empty:
-                log.warning(f"  No data returned for {ticker}.")
-                return []
-
-            # yahooquery returns a MultiIndex dataframe (symbol, date)
-            if hasattr(df.index, 'levels'):
-                df = df.xs(ticker, level=0)
-
-            df = df.reset_index()
-            df = df.rename(columns={"date": "date"})
-
-            rows = []
-            for _, row in df.iterrows():
-                rows.append({
-                    "ticker": ticker,
-                    "date":   str(row["date"])[:10],  # YYYY-MM-DD
-                    "open":   round(float(row["open"]),  4),
-                    "high":   round(float(row["high"]),  4),
-                    "low":    round(float(row["low"]),   4),
-                    "close":  round(float(row["close"]), 4),
-                    "volume": int(row["volume"]),
-                })
-            log.info(f"  Got {len(rows)} rows for {ticker}.")
-            return rows
-
-        except Exception as e:
-            last_err = e
-            if _is_rate_limit_error(e) and attempt < MAX_RETRIES:
-                backoff = BASE_BACKOFF_SECS * (2 ** (attempt - 1)) + random.uniform(0, 3)
-                log.warning(
-                    f"  {ticker}: rate-limited by Yahoo (attempt {attempt}/{MAX_RETRIES}). "
-                    f"Retrying in {backoff:.1f}s ..."
-                )
-                time.sleep(backoff)
-                continue
-            else:
-                log.error(f"  Error fetching {ticker}: {e}")
-                return []
-
-    log.error(f"  Giving up on {ticker} after {MAX_RETRIES} attempts: {last_err}")
-    return []
-
-
-def save_prices(conn, rows):
-    """Insert rows, skipping any date we already have (UNIQUE constraint)."""
-    inserted = 0
-    for row in rows:
-        try:
-            conn.execute("""
-                INSERT OR IGNORE INTO daily_prices
-                    (ticker, date, open, high, low, close, volume)
-                VALUES
-                    (:ticker, :date, :open, :high, :low, :close, :volume)
-            """, row)
-            if conn.total_changes > 0:
-                inserted += 1
-        except Exception as e:
-            log.error(f"  DB insert error for {row}: {e}")
-    conn.commit()
-    return inserted
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
-def main():
-    log.info("=== fetch_prices.py starting ===")
-    try:
-        conn = get_connection()
-        setup_database(conn)
-
-        tickers = load_tickers()
-        log.info(f"Tickers: {tickers}")
-        register_tickers(conn, tickers)
-
-        today     = datetime.today().date()
-        total_new = 0
-        failed_tickers = []
-
-        for i, ticker in enumerate(tickers):
-            try:
-                last_date = get_last_stored_date(conn, ticker)
-
-                if last_date:
-                    # Start from the day after last stored date
-                    start = (datetime.strptime(last_date, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
-                    log.info(f"{ticker}: last stored date is {last_date}, fetching from {start}")
-                else:
-                    # First run — go back INITIAL_HISTORY_DAYS
-                    start = (today - timedelta(days=INITIAL_HISTORY_DAYS)).isoformat()
-                    log.info(f"{ticker}: no data yet, fetching {INITIAL_HISTORY_DAYS} days of history from {start}")
-
-                end = today.isoformat()
-
-                if start >= end:
-                    log.info(f"{ticker}: already up to date, skipping.")
-                    continue
-
-                rows = fetch_prices_for_ticker(ticker, start, end)
-                if not rows:
-                    log.warning(f"{ticker}: no price rows retrieved.")
-                    failed_tickers.append(ticker)
-                new = save_prices(conn, rows)
-                total_new += new
-                log.info(f"{ticker}: saved {new} new rows.")
-            except Exception as ticker_err:
-                log.error(f"Error processing ticker {ticker}: {ticker_err}")
-                failed_tickers.append(ticker)
-
-            # Small pause between tickers so we don't fire requests at Yahoo in
-            # a tight burst — this is what triggered the 429s in the first place.
-            if i < len(tickers) - 1:
-                time.sleep(DELAY_BETWEEN_TICKERS_SECS)
-
-        conn.close()
-        log.info(f"=== Done. Total new rows inserted: {total_new} ===")
-        if failed_tickers:
-            log.warning(f"=== Tickers with no new data this run: {failed_tickers} ===")
-    except Exception as fatal_err:
-        log.critical(f"Fatal error in fetch_prices: {fatal_err}")
+  python3 -c "
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    if 'indicators' not in data or 'ticker' not in data:
         sys.exit(1)
+except Exception:
+    sys.exit(1)
+" "$TMP_IND"
+  if [ $? -ne 0 ]; then
+    log_error "Invalid indicators JSON structure for $TICKER."
+    rm -f "$TMP_IND" "$TMP_SNAP"
+    exit 1
+  fi
 
+  # 2. Fetch and validate Snapshot
+  curl -s -f -H "X-API-Key: $KEY" "$API/snapshot/$TICKER" > "$TMP_SNAP"
+  if [ $? -ne 0 ] || [ ! -s "$TMP_SNAP" ]; then
+    log_error "Failed to fetch snapshot for $TICKER (API/Network error)."
+    rm -f "$TMP_IND" "$TMP_SNAP"
+    exit 1
+  fi
 
-if __name__ == "__main__":
-    main()
+  python3 -c "
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    if 'snapshot' not in data or 'ticker' not in data:
+        sys.exit(1)
+except Exception:
+    sys.exit(1)
+" "$TMP_SNAP"
+  if [ $? -ne 0 ]; then
+    log_error "Invalid snapshot JSON structure for $TICKER."
+    rm -f "$TMP_IND" "$TMP_SNAP"
+    exit 1
+  fi
+
+  # 3. Combine and clean up
+  cat "$TMP_IND" "$TMP_SNAP" > "data/${TICKER}.json"
+  rm -f "$TMP_IND" "$TMP_SNAP"
+  echo "Exported $TICKER successfully"
+done
+
+# ── Step 3: Commit and push, with one retry on a rejected push ─────────────────
+git add data/ config/
+git commit -m "Daily indicator update $(date '+%Y-%m-%d')" || echo "Nothing to commit"
+
+if git push; then
+  echo "Done: $(date)"
+  exit 0
+fi
+
+# Push was rejected — most likely because something else pushed to origin/main
+# in between our pull and our push. Try exactly once to reconcile automatically
+# using --autostash so any in-progress state isn't lost, then push again.
+echo "Push rejected, attempting to reconcile with origin/main..."
+if git pull --rebase --autostash && git push; then
+  echo "Done after reconciling with origin: $(date)"
+  exit 0
+fi
+
+log_error "Push failed even after reconciliation attempt. The day's data is committed LOCALLY on this machine but NOT on GitHub. Run 'git status' and 'git log --oneline -5' to inspect, resolve manually, then push."
+exit 1
