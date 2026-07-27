@@ -34,10 +34,9 @@ python3 -c "import sqlite3; conn = sqlite3.connect('data/indicators.db'); cursor
 ## ⚙️ Maintenance
 
 ### Automated Tasks
-Two cron jobs run weekdays at 9pm UTC:
+To prevent race conditions, the data refresh and GitHub export are chained together to run on weekdays at 9pm UTC:
 ```cron
-0 21 * * 1-5 cd /home/ubuntu/indicator-lab && python3 scripts/run_all.py >> logs/cron.log 2>&1
-0 21 * * 1-5 /home/ubuntu/indicator-lab/export_to_github.sh >> logs/export.log 2>&1
+0 21 * * 1-5 cd /home/ubuntu/indicator-lab && python3 scripts/run_all.py >> logs/cron.log 2>&1 && ./export_to_github.sh >> logs/export.log 2>&1
 ```
 
 *Developed for Daniel — Sovson Analytics*
