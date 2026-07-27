@@ -15,9 +15,6 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 LOG_PATH = BASE_DIR / "logs" / "run_all.log"
 
-sys.path.append(str(BASE_DIR / "scripts"))
-from utils import send_telegram_alert
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)s  %(message)s",
@@ -40,12 +37,10 @@ def run(script_name):
         if result.returncode != 0:
             err_msg = f"{script_name} failed with exit code {result.returncode}"
             log.error(err_msg)
-            send_telegram_alert(f"❌ [run_all.py] {err_msg}")
             sys.exit(result.returncode)
     except Exception as e:
         err_msg = f"Exception running {script_name}: {e}"
         log.error(err_msg)
-        send_telegram_alert(f"❌ [run_all.py] {err_msg}")
         sys.exit(1)
     log.info(f"--- {script_name} completed successfully ---")
 
@@ -58,5 +53,4 @@ if __name__ == "__main__":
         log.info("=== run_all.py: pipeline complete ===")
     except Exception as e:
         log.critical(f"Unhandled exception in run_all.py: {e}")
-        send_telegram_alert(f"🚨 [run_all.py] Unhandled pipeline exception: {e}")
         sys.exit(1)

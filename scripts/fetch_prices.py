@@ -18,10 +18,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from yahooquery import Ticker
 
-import sys
-sys.path.append(str(Path(__file__).resolve().parent))
-from utils import send_telegram_alert
-
 # ── Setup ──────────────────────────────────────────────────────────────────────
 load_dotenv()
 
@@ -116,7 +112,6 @@ def fetch_prices_for_ticker(ticker, start_date, end_date):
 
         if df is None or df.empty:
             log.warning(f"  No data returned for {ticker}.")
-            send_telegram_alert(f"⚠️ [fetch_prices] No data returned for {ticker} from {start_date} to {end_date}.")
             return []
 
         # yahooquery returns a MultiIndex dataframe (symbol, date)
@@ -142,7 +137,6 @@ def fetch_prices_for_ticker(ticker, start_date, end_date):
 
     except Exception as e:
         log.error(f"  Error fetching {ticker}: {e}")
-        send_telegram_alert(f"❌ [fetch_prices] Error fetching {ticker}: {e}")
         return []
 
 
@@ -201,19 +195,16 @@ def main():
                 rows    = fetch_prices_for_ticker(ticker, start, end)
                 if not rows:
                     log.warning(f"{ticker}: no price rows retrieved.")
-                    send_telegram_alert(f"⚠️ [fetch_prices] Empty data returned for {ticker} (fetch window: {start} to {end})")
                 new     = save_prices(conn, rows)
                 total_new += new
                 log.info(f"{ticker}: saved {new} new rows.")
             except Exception as ticker_err:
                 log.error(f"Error processing ticker {ticker}: {ticker_err}")
-                send_telegram_alert(f"❌ [fetch_prices] Failed to process ticker {ticker}: {ticker_err}")
 
         conn.close()
         log.info(f"=== Done. Total new rows inserted: {total_new} ===")
     except Exception as fatal_err:
         log.critical(f"Fatal error in fetch_prices: {fatal_err}")
-        send_telegram_alert(f"🚨 [fetch_prices] Fatal pipeline crash: {fatal_err}")
         sys.exit(1)
 
 

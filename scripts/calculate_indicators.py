@@ -16,13 +16,8 @@ import sqlite3
 import logging
 import json
 from pathlib import Path
-import sys
-
 import pandas as pd
 import numpy as np
-
-sys.path.append(str(Path(__file__).resolve().parent))
-from utils import send_telegram_alert
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -261,13 +256,11 @@ def main():
                 total += calculate_for_ticker(conn, ticker)
             except Exception as ticker_err:
                 log.error(f"Error calculating indicators for {ticker}: {ticker_err}")
-                send_telegram_alert(f"❌ [calculate_indicators] Error for {ticker}: {ticker_err}")
 
         conn.close()
         log.info(f"=== Done. Total rows written: {total} ===")
     except Exception as fatal_err:
         log.critical(f"Fatal error in calculate_indicators: {fatal_err}")
-        send_telegram_alert(f"🚨 [calculate_indicators] Fatal pipeline crash: {fatal_err}")
         sys.exit(1)
 
 
