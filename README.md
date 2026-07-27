@@ -1,22 +1,27 @@
-# Sovson Indicator Lab
+## 🗺️ Roadmap — Geometric Pattern Recognition
 
-**Sovson Analytics** — A specialized stock indicator analysis engine running on Oracle Cloud.
+### 🎯 Goal
+Move the Sovson Indicator Lab from **reactive** indicator reporting (RSI, MACD, Bollinger Bands, SMA 200) toward **proactive** geometric pattern recognition — spotting the *shape* of price action (flags, wedges, head & shoulders, wave cycles) to anticipate moves rather than just react to them.
 
-This project employs a hybrid architecture: it maintains a **local historical database** on an Oracle Cloud VM for deep historical analysis, while publishing **lightweight daily snapshots** to this repository for easy, on-demand access by AI assistants.
+### 📚 Pattern Library
 
----
+| Pattern | Type | Core Concept | Reference |
+|---|---|---|---|
+| **Bullish Flag** | Continuation | Brief consolidation after a strong upward move, followed by a resumption of the trend | [TradingView guide](https://www.tradingview.com/support/solutions/43000653209/) |
+| **Head and Shoulders** | Reversal | Three peaks (higher-lower-higher... wait, middle peak highest) signaling a top forming at the end of an uptrend | [TradingView guide](https://www.tradingview.com/support/solutions/43000653213/) |
+| **Rising Wedge** | Bearish Reversal | Two converging upward-sloping trendlines — narrowing price action signals fading momentum despite still-rising price | [TradingView guide](https://www.tradingview.com/support/solutions/43000653219/) |
+| **Elliott Wave** | Cycle Analysis | Fractal 5-wave impulse / 3-wave correction cycle rooted in crowd psychology | [TradingView guide](https://www.tradingview.com/support/solutions/43000653212/) |
 
-## 🏗️ System Architecture
+### 🔨 Planned Build Sequence
 
-### 1. The Engine (Local Oracle VM)
-* **Storage:** 3+ years of raw historical OHLCV data is housed locally in a **SQLite database** (`data/indicators.db`).
-* **Processing:** Python scripts (`scripts/`) fetch daily data from Yahoo Finance, compute technical indicators, and update the local database.
+Patterns will be introduced in order of reliability and ease of automated detection — not the order listed above:
 
-### 2. The Dashboard (GitHub Repository)
-* **Export:** An automated script (`export_to_github.sh`) generates JSON snapshots of market data.
-* **Accessibility:** These JSON files serve as a public data source, allowing AI assistants to read current market data instantly.
+1. **Backtest harness first** — before any pattern goes live, build the infrastructure to test it against historical OHLCV data and confirm it clears the same win-rate bar (≥60% at the 10-day forward window) used for the existing indicator tournament.
+2. **Pilot candlestick patterns via `pandas-ta`** — lowest-risk starting point since it's a well-supported library rather than custom geometry detection.
+3. **Geometric patterns (Bullish Flag, Rising Wedge, Head & Shoulders)** — detected using `scipy.signal.argrelextrema` to find local highs/lows, tested against historical SQLite OHLCV data before promotion to a live signal.
+4. **Elliott Wave** — last in line, if pursued at all. Wave-counting is inherently subjective and harder to automate reliably; it only gets built once the simpler geometric patterns have proven out.
 
----
+### ✅ Promotion Criteria
 
 ## 🛠️ Accessing Data
 
@@ -40,3 +45,4 @@ To prevent race conditions, the data refresh and GitHub export are chained toget
 ```
 
 *Developed for Daniel — Sovson Analytics*
+Same bar as every other contestant in the Indicator Lab: a pattern only becomes a live signal candidate once it demonstrates a **≥60% win rate at the 10-day forward window** in backtesting. No pattern goes live on vibes alone — human review of the backtest results decides if/when it graduates.
