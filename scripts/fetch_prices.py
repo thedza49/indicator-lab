@@ -130,7 +130,27 @@ def fetch_prices_for_ticker(ticker, start_date, end_date):
             df = t.history(start=start_date, end=end_date)
 
             if df is None or df.empty:
-                log.warning(f"  No data returned for {ticker}.")
+                # An empty result isn't necessarily "no new data" — Yahoo
+                # sometimes hasn't finished publishing the day's EOD candle
+                # yet right after market close, or silently rate-limits us
+                # without raising an exception we can detect by message.
+                # Treat it as transient and retry, same as a rate-limit hit,
+                # instead of accepting it as final and moving on with stale
+                # data. This is what let a "successful" run on 2026-07-31
+                # commit an unchanged snapshot with no new close price.
+                if attempt < MAX_RETRIES:
+                    backoff = BASE_BACKOFF_SECS * (2 ** (attempt - 1)) + random.uniform(0, 3)
+                    log.warning(
+                        f"  {ticker}: empty result on attempt {attempt}/{MAX_RETRIES} "
+                        f"(data may not be published yet, or a silent rate limit). "
+                        f"Retrying in {backoff:.1f}s ..."
+                    )
+                    time.sleep(backoff)
+                    continue
+                log.error(
+                    f"  {ticker}: still empty after {MAX_RETRIES} attempts. "
+                    f"Giving up for this run — will retry next scheduled run."
+                )
                 return []
 
             # yahooquery returns a MultiIndex dataframe (symbol, date)
