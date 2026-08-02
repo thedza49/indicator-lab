@@ -17,9 +17,9 @@ import json
 import subprocess
 from functools import wraps
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from flask import Flask, jsonify, request, abort, Response
+from flask import Flask, jsonify, request, abort, Response, session, redirect, url_for
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,6 +29,12 @@ DB_PATH  = BASE_DIR / "data" / "indicators.db"
 CFG_PATH = BASE_DIR / "config" / "tickers.json"
 
 app = Flask(__name__)
+# Secret key signs the session cookie — set SECRET_KEY in .env so sessions
+# survive a restart of the app (otherwise everyone gets logged out each time
+# api/app.py restarts). Falls back to a random one if not set, which still
+# works, just logs everyone out on every restart.
+app.secret_key = os.getenv("SECRET_KEY") or os.urandom(24)
+app.permanent_session_lifetime = timedelta(days=30)
 
 FLASK_PORT = int(os.getenv("FLASK_PORT", 5001))
 API_KEY    = os.getenv("API_KEY", "")  # Optional: set in .env to require a key
@@ -57,8 +63,9 @@ def check_api_key():
             abort(401)
 
 
-# ── Admin auth (separate from the API key, since a browser can't easily send
-#    a custom header — HTTP Basic Auth works natively in every browser) ──────
+# ── Admin auth (session-cookie based — log in once via a form, stay logged
+#    in after that, instead of the browser re-prompting Basic Auth on every
+#    new URL under /admin) ─────────────────────────────────────────────────────
 def require_admin_auth(f):
     @wraps(f)
     def wrapped(*args, **kwargs):
@@ -67,14 +74,53 @@ def require_admin_auth(f):
                 "Admin page is disabled: set ADMIN_PASSWORD in .env to enable it.",
                 401
             )
-        auth = request.authorization
-        if not auth or auth.username != "admin" or auth.password != ADMIN_PASSWORD:
-            return Response(
-                "Login required.", 401,
-                {"WWW-Authenticate": 'Basic realm="Indicator Lab Admin"'}
-            )
+        if not session.get("admin_logged_in"):
+            return redirect(url_for("admin_login"))
         return f(*args, **kwargs)
     return wrapped
+
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    error = ""
+    if request.method == "POST":
+        if not ADMIN_PASSWORD:
+            return Response(
+                "Admin page is disabled: set ADMIN_PASSWORD in .env to enable it.",
+                401
+            )
+        if request.form.get("password", "") == ADMIN_PASSWORD:
+            session["admin_logged_in"] = True
+            session.permanent = True
+            return redirect(url_for("admin_page"))
+        error = "Wrong password."
+
+    return f"""
+    <html>
+    <head>
+      <title>Indicator Lab — Login</title>
+      <style>
+        body {{ font-family: -apple-system, Arial, sans-serif; max-width: 360px; margin: 80px auto; }}
+        input[type=password] {{ padding: 8px; font-size: 16px; width: 100%; box-sizing: border-box; }}
+        button {{ padding: 8px 16px; margin-top: 10px; cursor: pointer; }}
+      </style>
+    </head>
+    <body>
+      <h2>Indicator Lab Admin</h2>
+      <form method="POST">
+        <input type="password" name="password" placeholder="Password" autofocus required>
+        <button type="submit">Log in</button>
+      </form>
+      {'<p style="color:#c33;">' + error + '</p>' if error else ''}
+    </body>
+    </html>
+    """
+
+
+@app.route("/admin/logout", methods=["POST"])
+def admin_logout():
+    session.pop("admin_logged_in", None)
+    return redirect(url_for("admin_login"))
 
 
 # ── DB helper ─────────────────────────────────────────────────────────────────
@@ -167,7 +213,11 @@ def render_admin_page(message="", log_text=None):
       <p class="tools">
         <a href="https://claude.ai" target="_blank">Claude</a>
         <a href="https://gemini.google.com" target="_blank">Gemini</a>
+        <a href="https://github.com/thedza49/indicator-lab/tree/main/data" target="_blank">Check data on GitHub</a>
       </p>
+      <form method="POST" action="/admin/logout" style="display:inline;">
+        <button type="submit" style="font-size:12px;padding:4px 8px;">Log out</button>
+      </form>
 
       {banner}
       <form method="POST" action="/admin/tickers/add">
