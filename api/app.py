@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import json
+import subprocess
 from functools import wraps
 from pathlib import Path
 from datetime import datetime
@@ -97,7 +98,24 @@ def save_tickers(tickers):
     return unique_sorted
 
 
-def render_admin_page(message=""):
+def run_pipeline_command(cmd, timeout=600):
+    """Runs a command from the project root, capturing combined output.
+    Used by the catch-up button — every step of the pipeline goes through
+    this so failures show up in the on-page log instead of disappearing."""
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(BASE_DIR), capture_output=True, text=True, timeout=timeout
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        return result.returncode, output
+    except subprocess.TimeoutExpired as e:
+        partial = (e.stdout or "") + (e.stderr or "")
+        return -1, f"[Timed out after {timeout}s]\n{partial}"
+    except Exception as e:
+        return -1, f"[Error running command: {e}]"
+
+
+def render_admin_page(message="", log_text=None):
     tickers = load_tickers()
     rows = "".join(
         f"""<tr>
@@ -112,20 +130,45 @@ def render_admin_page(message=""):
         for t in tickers
     )
     banner = f'<p style="color:#2a7;font-weight:bold;">{message}</p>' if message else ""
+
+    log_block = ""
+    if log_text is not None:
+        # Basic HTML-escaping so log output (which may include quotes, angle
+        # brackets from error messages, etc.) doesn't break the page layout.
+        escaped = (
+            log_text.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+        )
+        log_block = f"""
+          <h3>Catch-up log</h3>
+          <pre style="background:#111;color:#0f0;padding:12px;border-radius:6px;
+                       max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap;">{escaped}</pre>
+        """
+
     return f"""
     <html>
     <head>
       <title>Indicator Lab — Tickers</title>
       <style>
-        body {{ font-family: -apple-system, Arial, sans-serif; max-width: 480px; margin: 40px auto; }}
+        body {{ font-family: -apple-system, Arial, sans-serif; max-width: 560px; margin: 40px auto; }}
         table {{ width: 100%; border-collapse: collapse; }}
         td {{ padding: 8px; border-bottom: 1px solid #ddd; }}
         input[type=text] {{ padding: 6px; font-size: 16px; text-transform: uppercase; }}
         button {{ padding: 6px 12px; cursor: pointer; }}
+        .tools a {{ margin-right: 14px; }}
+        .catchup-btn {{ background:#2a6; color:white; border:none; padding:10px 16px;
+                        border-radius:6px; font-size:15px; cursor:pointer; }}
       </style>
     </head>
     <body>
       <h2>Sovson Indicator Lab — Tickers</h2>
+
+      <p class="tools">
+        <a href="https://claude.ai" target="_blank">Claude</a>
+        <a href="https://gemini.google.com" target="_blank">Gemini</a>
+      </p>
+
       {banner}
       <form method="POST" action="/admin/tickers/add">
         <input type="text" name="ticker" placeholder="e.g. AAPL" maxlength="10" required>
@@ -135,9 +178,25 @@ def render_admin_page(message=""):
       <table>{rows}</table>
       <p style="color:#888;font-size:13px;">
         Adding a ticker registers it for the next scheduled fetch — it'll show up
-        with data after the next weekday 9pm UTC run. Removing a ticker only stops
-        future fetches; it doesn't delete its existing price history.
+        with data after the next weekday 9pm UTC run, or right away if you hit
+        "Run Catch-Up Now" below.
       </p>
+
+      <hr>
+      <h3>Catch-up</h3>
+      <p style="color:#888;font-size:13px;">
+        Runs the full pipeline right now — fetches price history for any new
+        tickers, recalculates indicators, exports everything to GitHub, and
+        removes GitHub data files for any ticker no longer in your list above.
+        Takes a couple of minutes. Don't close this tab while it runs.
+      </p>
+      <form method="POST" action="/admin/catchup">
+        <button type="submit" class="catchup-btn" onclick="this.innerText='Running... please wait';">
+          Run Catch-Up Now
+        </button>
+      </form>
+
+      {log_block}
     </body>
     </html>
     """
@@ -174,6 +233,63 @@ def admin_remove_ticker():
     tickers.remove(ticker)
     save_tickers(tickers)
     return render_admin_page(f"Removed {ticker}.")
+
+
+@app.route("/admin/catchup", methods=["POST"])
+@require_admin_auth
+def admin_catchup():
+    """
+    Runs the full pipeline on demand:
+      1. fetch_prices.py       — pull any missing price history (new tickers
+                                  get up to a year of backfill automatically)
+      2. calculate_indicators.py — recompute MACD/RSI/Bollinger/SMA200
+      3. export_to_github.sh   — push updated data/*.json for current tickers
+      4. Remove data/<ticker>.json from GitHub for any ticker that's been
+         removed from config/tickers.json (export_to_github.sh only writes
+         files for tickers it's told about — it never deletes old ones on
+         its own, so a separate small commit handles that here).
+    """
+    log_parts = []
+
+    log_parts.append("=== Step 1/4: fetch_prices.py ===")
+    rc, out = run_pipeline_command(["python3", "scripts/fetch_prices.py"])
+    log_parts.append(out)
+    if rc != 0:
+        log_parts.append(f"[fetch_prices.py exited with code {rc} — continuing anyway]")
+
+    log_parts.append("\n=== Step 2/4: calculate_indicators.py ===")
+    rc, out = run_pipeline_command(["python3", "scripts/calculate_indicators.py"])
+    log_parts.append(out)
+    if rc != 0:
+        log_parts.append(f"[calculate_indicators.py exited with code {rc} — continuing anyway]")
+
+    log_parts.append("\n=== Step 3/4: export_to_github.sh ===")
+    rc, out = run_pipeline_command(["bash", "export_to_github.sh"])
+    log_parts.append(out)
+    if rc != 0:
+        log_parts.append(f"[export_to_github.sh exited with code {rc} — stopping before cleanup step]")
+        return render_admin_page("Catch-up finished with errors — see log below.", "\n".join(log_parts))
+
+    log_parts.append("\n=== Step 4/4: removing stale ticker files from GitHub ===")
+    current = set(load_tickers())
+    data_dir = BASE_DIR / "data"
+    stale = [f.name for f in data_dir.glob("*.json") if f.stem not in current]
+
+    if not stale:
+        log_parts.append("No stale ticker files to remove.")
+    else:
+        rc, out = run_pipeline_command(["git", "rm", "-f"] + [f"data/{name}" for name in stale])
+        log_parts.append(out)
+        rc, out = run_pipeline_command(
+            ["git", "commit", "-m", f"Remove data for untracked tickers: {', '.join(stale)}"]
+        )
+        log_parts.append(out)
+        rc, out = run_pipeline_command(["git", "push"])
+        log_parts.append(out)
+        if rc == 0:
+            log_parts.append(f"Removed from GitHub: {', '.join(stale)}")
+
+    return render_admin_page("Catch-up complete.", "\n".join(log_parts))
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -358,4 +474,4 @@ if __name__ == "__main__":
     host = os.getenv("FLASK_HOST", "0.0.0.0")
     debug = os.getenv("DEBUG", "false").lower() == "true"
     print(f"Starting Sovson Indicator Lab API on {host}:{FLASK_PORT}")
-    app.run(host=host, port=FLASK_PORT, debug=debug)
+    app.run(host=host, port=FLASK_PORT, debug=debug, threaded=True)
