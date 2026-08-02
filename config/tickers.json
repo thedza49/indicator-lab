@@ -1,19 +1,18 @@
 {
   "tickers": [
     "AAPL",
+    "AMZN",
+    "AVGO",
+    "GOOG",
+    "HOOD",
+    "INTC",
+    "JPM",
     "META",
     "MSFT",
-    "NVDA",
-    "GOOG",
-    "SNDK",
     "MU",
-    "AMZN",
-    "ORCL",
+    "NVDA",
     "NVT",
-    "HOOD",
-    "TSM",
-    "AVGO",
-    "INTC"
-  ],
-  "notes": "Add or remove tickers here. Use uppercase ticker symbols only."
+    "SNDK",
+    "TSM"
+  ]
 }
