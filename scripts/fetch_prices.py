@@ -136,8 +136,7 @@ def fetch_prices_for_ticker(ticker, start_date, end_date):
                 # without raising an exception we can detect by message.
                 # Treat it as transient and retry, same as a rate-limit hit,
                 # instead of accepting it as final and moving on with stale
-                # data. This is what let a "successful" run on 2026-07-31
-                # commit an unchanged snapshot with no new close price.
+                # data.
                 if attempt < MAX_RETRIES:
                     backoff = BASE_BACKOFF_SECS * (2 ** (attempt - 1)) + random.uniform(0, 3)
                     log.warning(
@@ -239,9 +238,13 @@ def main():
                     start = (today - timedelta(days=INITIAL_HISTORY_DAYS)).isoformat()
                     log.info(f"{ticker}: no data yet, fetching {INITIAL_HISTORY_DAYS} days of history from {start}")
 
-                end = today.isoformat()
+                # yahooquery/Yahoo's `end` boundary is exclusive, so a request
+                # window of [start, today) never actually includes today's own
+                # close — every run was landing one full trading day behind.
+                # Push the boundary out by one day so today is included.
+                end = (today + timedelta(days=1)).isoformat()
 
-                if start >= end:
+                if start > today.isoformat():
                     log.info(f"{ticker}: already up to date, skipping.")
                     continue
 
